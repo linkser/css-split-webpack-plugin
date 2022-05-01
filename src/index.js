@@ -1,5 +1,6 @@
 import postcss from 'postcss';
 import chunk from './chunk';
+import {Compilation} from 'webpack';
 import {SourceMapSource, RawSource} from 'webpack-sources';
 import {interpolateName} from 'loader-utils';
 
@@ -130,11 +131,11 @@ export default class CSSSplitWebpackPlugin {
     });
   }
 
-  chunksMapping(compilation, chunks, done) {
+  chunksMapping(compilation, chunks) {
     const assets = compilation.assets;
     const publicPath = strip(compilation.options.output.publicPath || './');
-    const promises = chunks.map((chunk) => {
-      const input = chunk.files.filter(isCSS);
+    const promises = Array.from(chunks).map((chunk) => {
+      const input = Array.from(chunk.files).filter(isCSS);
       const items = input.map((name) => this.file(name, assets[name]));
       return Promise.all(items).then((entries) => {
         entries.forEach((entry) => {
@@ -145,10 +146,12 @@ export default class CSSSplitWebpackPlugin {
           }
           // Inject the new files into the chunk.
           entry.chunks.forEach((file) => {
-            assets[file.name] = file;
-            chunk.files.push(file.name);
+            const name = file.name // RawSource
+              || file._name; // SourceMapSource
+            assets[name] = file;
+            chunk.files.add(name);
           });
-          const content = entry.chunks.map((file) => {
+          const content = Array.from(entry.chunks).map((file) => {
             return `@import "${publicPath}/${file._name}";`;
           }).join('\n');
           const imports = this.options.imports({
@@ -156,20 +159,18 @@ export default class CSSSplitWebpackPlugin {
             content,
           });
           if (!this.options.preserve) {
-            chunk.files.splice(chunk.files.indexOf(entry.file), 1);
+            chunk.files.delete(entry.file);
             delete assets[entry.file];
           }
           if (imports) {
             assets[imports] = new RawSource(content);
-            chunk.files.push(imports);
+            chunk.files.add(imports);
           }
         });
         return Promise.resolve();
       });
     });
-    Promise.all(promises).then(() => {
-      done();
-    }, done);
+    return Promise.all(promises);
   }
 
   /**
@@ -187,17 +188,23 @@ export default class CSSSplitWebpackPlugin {
       // Run on `emit` when user specifies the compiler phase
       // Due to the incorrect css split + optimization behavior
       // Expected: css split should happen after optimization
-      compiler.plugin('emit', (compilation, done) => {
-        return this.chunksMapping(compilation, compilation.chunks, done);
+      compiler.hooks.emit.tapPromise('CSSSplitWebpackPlugin', (compilation) => {
+        return this.chunksMapping(compilation, compilation.chunks);
       });
     } else {
       // Only run on `this-compilation` to avoid injecting the plugin into
-      // sub-compilers as happens when using the `extract-text-webpack-plugin`.
-      compiler.plugin('this-compilation', (compilation) => {
-        compilation.plugin('optimize-chunk-assets', (chunks, done) => {
-          return this.chunksMapping(compilation, chunks, done);
-        });
-      });
+      // sub-compilers as happens when using the `mini-css-extract-plugin`.
+      compiler.hooks.thisCompilation.tap('CSSSplitWebpackPlugin',
+        (compilation) => {
+          compilation.hooks.processAssets.tapPromise({
+            name: 'CSSSplitWebpackPlugin',
+            stage: Compilation.PROCESS_ASSETS_STAGE_OPTIMIZE,
+          }, () => {
+            return this.chunksMapping(compilation, compilation.chunks);
+          });
+        }
+      );
     }
   }
+  2004
 }
